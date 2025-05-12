@@ -1,0 +1,13 @@
+{% extends "news/base.html" %}
+{% block title %}Select Categories{% endblock %}
+{% block content %}
+<div class="card shadow p-4 mx-auto" style="max-width: 600px">
+  <h2 class="mb-4 text-center">Choose Your Interests</h2>
+  <form method="post">
+    {% csrf_token %} {{ form.as_p }}
+    <button type="submit" class="btn btn-success w-100 mt-3">
+      Save Preferences
+    </button>
+  </form>
+</div>
+{% endblock %}

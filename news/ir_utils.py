@@ -1,117 +1,76 @@
-# news/ir_utils.py
-import re
-from nltk.tokenize import word_tokenize
-from nltk.corpus import stopwords
-from nltk.stem import PorterStemmer
-from .models import Article
- 
+from pgvector.django import L2Distance, CosineDistance
+from .models import ArticleEmbedding, UserArticleInteraction, Article
+import numpy as np
+import math
+from datetime import datetime, timezone
 
-class InvertedIndex:
-    def __init__(self):
-        self.index = {}  # term -> list of article IDs
-        self.stemmer = PorterStemmer()
-        self.stopwords = set(stopwords.words('english'))
-        self.build_index()
-    
-    def preprocess_text(self, text):
-        """Tokenize, remove stopwords, and stem text"""
-        if not text:
-            return []
-        # Lowercase and tokenize
-        tokens = word_tokenize(text.lower())
-        # Remove stopwords and stem
-        tokens = [self.stemmer.stem(token) for token in tokens 
-                 if token.isalnum() and token not in self.stopwords]
-        return tokens
-    
-    def build_index(self):
-        """Build inverted index from all articles in database"""
-        # Get all articles
-        articles = Article.objects.all()
-        
-        # Process each article
-        for article in articles:
-            # Combine title and content for better retrieval
-            text = f"{article.title} {article.content}"
-            
-            # Get tokens
-            tokens = self.preprocess_text(text)
-            
-            # Add each token to the index
-            for token in set(tokens):  # Use set to count each term only once per document
-                if token not in self.index:
-                    self.index[token] = []
-                if article.id not in self.index[token]:
-                    self.index[token].append(article.id)
-                    
-    def parse_boolean_query(self, query_string):
-        """Parse a Boolean query into a list of terms and operators"""
-        # Replace operators with spaces around them for easier tokenization
-        query_string = query_string.replace('AND', ' AND ')
-        query_string = query_string.replace('OR', ' OR ')
-        query_string = query_string.replace('NOT', ' NOT ')
-        
-        tokens = query_string.split()
-        return tokens
+INTERACTION_WEIGHTS = {
+    "click": 1.0,
+    "like": 2.5,
+    "bookmark": 3.0,
+    "dislike": -3.0,  # negative influence
+}
 
-    
+DECAY_RATE = 0.3
 
-# Add this function outside the class
-def get_articles_from_ids(article_ids):
-    """Retrieve Article objects from a list of IDs"""
-    return Article.objects.filter(id__in=article_ids)
 
-def boolean_search(self, query_string):
-        """
-        Process a Boolean query and return matching article IDs
-        Supports AND, OR, NOT operators (case sensitive)
-        """
-        if not query_string or not self.index:
-            return []
-        
-        tokens = inverted_index.parse_boolean_query(query_string)
-        
-        # Process NOT operators first
-        i = 0
-        while i < len(tokens):
-            if tokens[i] == 'NOT' and i + 1 < len(tokens):
-                # Get all document IDs
-                all_docs = set()
-                for docs in self.index.values():
-                    all_docs.update(docs)
-                
-                # Get documents containing the term
-                term = self.stemmer.stem(tokens[i+1].lower())
-                term_docs = set(self.index.get(term, []))
-                
-                # Replace NOT term with complement
-                tokens[i:i+2] = [list(all_docs - term_docs)]
-            else:
-                i += 1
-        
-        # Process each term and AND/OR operators
-        result = []
-        current_op = "OR"  # Default operator
-        
-        for token in tokens:
-            if token == 'AND':
-                current_op = 'AND'
-            elif token == 'OR':
-                current_op = 'OR'
-            else:
-                # Token is a term or already processed result
-                if isinstance(token, list):
-                    term_docs = token
-                else:
-                    # Get stemmed term
-                    term = self.stemmer.stem(token.lower())
-                    term_docs = self.index.get(term, [])
-                
-                if not result:
-                    result = term_docs
-                elif current_op == 'AND':
-                    result = list(set(result) & set(term_docs))
-                elif current_op == 'OR':
-                    result = list(set(result) | set(term_docs))
-        
-        return result
+def get_decay_weight(interaction_date):
+    now = datetime.now(timezone.utc)
+    age_days = (now - interaction_date).days
+    return math.exp(-DECAY_RATE * age_days)
+
+
+def get_weighted_user_embeddings(user):
+    interactions = UserArticleInteraction.objects.filter(user=user)
+    article_weights = {}
+
+    for interaction in interactions:
+        article_id = interaction.article.id
+        weight = INTERACTION_WEIGHTS.get(interaction.interaction_type, 0)
+        decay_weight = get_decay_weight(interaction.interacted_at)
+        final_score = weight * decay_weight
+
+        if article_id in article_weights:
+            article_weights[article_id] += final_score
+        else:
+            article_weights[article_id] = final_score
+
+    embeddings = []
+    weights = []
+
+    for article_id, weight in article_weights.items():
+        if weight == 0:
+            continue
+
+        try:
+            embedding = ArticleEmbedding.objects.get(article_id=article_id).embedding
+            if embedding is not None and len(embedding) > 0:
+                embeddings.append(np.array(embedding))
+                weights.append(weight)
+        except ArticleEmbedding.DoesNotExist:
+            continue
+
+    if embeddings is None or len(embeddings) == 0:
+        return None
+
+    # Weighted average
+    weighted_sum = np.average(embeddings, axis=0, weights=weights)
+    return weighted_sum.tolist()
+
+
+def get_personalized_recommendations(user, limit=10):
+    query_embedding = get_weighted_user_embeddings(user)
+    if query_embedding is None or not isinstance(query_embedding, list):
+        return Article.objects.none()
+
+    interacted_ids = UserArticleInteraction.objects.filter(user=user).values_list(
+        "article_id", flat=True
+    )
+
+    similar_articles = (
+        ArticleEmbedding.objects.exclude(article_id__in=interacted_ids)
+        .annotate(similarity=CosineDistance("embedding", query_embedding))
+        .order_by("similarity")[:limit]
+    )
+
+    return [item.article for item in similar_articles]

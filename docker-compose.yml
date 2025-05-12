@@ -1,0 +1,34 @@
+version: '3'
+
+services:
+
+  db:
+    container_name: postgres-smartnews
+    image: postgres
+    restart: always
+    env_file:
+      - .env.db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+
+  web:
+    container_name: smartnews
+    build: .
+    command: gunicorn smartnews.wsgi:application --bind 0.0.0.0:8000 --workers=2 --timeout 300 --reload
+    ports:
+      - 8000
+    restart: always
+    env_file:
+      - .env.dev
+    depends_on:
+      - db
+    volumes:
+      - .:/app
+      - staticfiles:/app/static
+      - mediafiles:/app/media
+
+
+volumes:
+  staticfiles:
+  mediafiles:
+  postgres_data:

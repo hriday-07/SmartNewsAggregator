@@ -3,3 +3,7 @@ __pycache__/
 *.pyo
 *.pyd
 *.pyc
+.env.db
+.env.dev
+.DS_Store
+
